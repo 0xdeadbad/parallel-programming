@@ -10,26 +10,51 @@
 #include <string.h>
 #include <semaphore.h>
 
+/* 
+ * A macro MULTIPLE_TESTS define em tempo de compilação quantos testes multi threaded seram executados.
+ * Caso ela não esteja definida via parâmetro -DMULTIPLE_TESTS=<número de testes> o padrão de quantidade de testes
+ * será 1.
+ */
 #ifndef MULTIPLE_TESTS
 #define MULTIPLE_TESTS 1
+/*
+ * Caso seja definido que o programa rodará múltiplos testes, também poderá ser definido quantas threads irá aumentar 
+ * de um teste para outro.
+ * Caso esta macro não esteja definida via parâmetro -DTHREADS_SKIP=<número de threads> o padrão de quantidade de threads puladas
+ * será 3.
+ */
 #ifndef THREADS_SKIP
 #define THREADS_SKIP 3
 #endif
 #endif
 
+/*
+ * Por padrão o programa irá utilizar de semáforos para criar uma barreira que sincronizará as threads, 
+ * as fazendo iniciar a tarefa todas ao mesmo tempo.
+ */
 #define USE_SEMAPHORES
 
+/*
+ * Caso seja desejado, também pode-se definir a macro DONT_USE_SEMAPHORES via parâmetro do compilador -DDONT_USE_SEMAPHORES.
+ * Assim as threads não irão esperar a sincronização e poderam começar fora de ordem, porém não afeterá o resultado final da conta
+ * mas provavelmente o tempo que as threads leverão para fazer os cálculos.
+ */
 #ifdef DONT_USE_SEMAPHORES
 #undef USE_SEMAPHORES
 #endif
 
+/*
+ * Não explicarei tudo daqui para baixo, pois trata-se apenas de linhas de códigos triviais.
+ * De qualquer modo mais informações podem ser encontradas no arquivo README.txt
+ */
+
 typedef struct {
-    uint64_t *array, count;
+    uint32_t *array;
+    uint64_t subarray_count;
 #ifdef USE_SEMAPHORES
-    uint64_t *counter, soma;
-    sem_t *_semaphore;
-    pthread_mutex_t *_mutex1, *_mutex2;
-    pthread_cond_t *_cond;
+    uint64_t soma;
+    uint32_t thread_count, *counter;
+    sem_t *_sem_count, *_sem_stop;
 #endif
 } thread_producer_arg_t;
 
@@ -45,18 +70,23 @@ int fail_errno(const char *msg) {
 
 void* producer(void *arg) {
 #ifdef USE_SEMAPHORES
-    pthread_mutex_lock(((thread_producer_arg_t*)arg)->_mutex1);
-    --(*(((thread_producer_arg_t*)arg)->counter));
-    pthread_mutex_unlock(((thread_producer_arg_t*)arg)->_mutex1);
+    thread_producer_arg_t *st = (thread_producer_arg_t*)arg;
+    sem_wait(st->_sem_count);
+    if(*(st->counter) == st->thread_count - 1) {
+        sem_post(st->_sem_count);
+        for(uint32_t i = 0; i < st->thread_count - 1; i++)
+            sem_post(st->_sem_stop);
+    } else {
+        (*(st->counter))++;
+        sem_post(st->_sem_count);
+        sem_wait(st->_sem_stop);
+    }
     
-    pthread_mutex_lock(((thread_producer_arg_t*)arg)->_mutex2);
-    pthread_cond_wait(((thread_producer_arg_t*)arg)->_cond, ((thread_producer_arg_t*)arg)->_mutex2);
-    pthread_mutex_unlock(((thread_producer_arg_t*)arg)->_mutex2);
 #else
     uint64_t s;
     s = 0;
 #endif
-    for(uint64_t i = 0; i < ((thread_producer_arg_t*)arg)->count; i++)
+    for(uint64_t i = 0; i < ((thread_producer_arg_t*)arg)->subarray_count; i++)
 #ifdef USE_SEMAPHORES
         ((thread_producer_arg_t*)arg)->soma += ((thread_producer_arg_t*)arg)->array[i];
     pthread_exit(arg);
@@ -68,27 +98,14 @@ void* producer(void *arg) {
 }
 
 int main(int argc, char **argv) {
-    uint64_t array_size, soma, chunk_size, *array, threads_count;
+    uint64_t soma, array_size;
+    uint32_t chunk_size, *array, threads_count;
     pthread_t *threads;
+    sem_t _sem_count, _sem_stop;
     struct timeval begin, end;
     char *end_ptr;
     long seconds, microseconds;
     double elapsed;
-
-#ifdef USE_SEMAPHORES
-    sem_t _semaphore;
-    pthread_mutex_t _mutex1, _mutex2;
-    pthread_cond_t _cond;
-
-    if(sem_init(&_semaphore, 0, 0) != 0)
-        return fail_errno("Falha ao iniciar semáforo");
-    if(pthread_mutex_init(&_mutex1, NULL) != 0)
-        return fail_errno("Falha ao inicializar mutex 1");
-    if(pthread_mutex_init(&_mutex2, NULL) != 0)
-        return fail_errno("Falha ao inicializar mutex 2");
-    if(pthread_cond_init(&_cond, NULL) != 0)
-        return fail_errno("Falha ao inicializar cond");
-#endif
 
     errno = 0;
 
@@ -105,6 +122,11 @@ int main(int argc, char **argv) {
 
     if(threads_count > array_size)
         return fail("A quantidade de threads não pode ser maior que o tamanho do vetor.");
+
+    if(sem_init(&_sem_count, 0, 1) != 0)
+        return fail_errno("Falha ao iniciar semáforo");
+    if(sem_init(&_sem_stop, 0, 0) != 0)
+        return fail_errno("Falha ao iniciar semáforo");
 
     array = calloc(array_size, sizeof(uint64_t));
     threads = NULL;
@@ -139,52 +161,40 @@ int main(int argc, char **argv) {
     fwrite(record, sizeof(char), strlen(record), f);
 #endif
 
-    for(uint64_t m = 0; m < MULTIPLE_TESTS; m++) {
+    for(uint32_t m = 0; m < MULTIPLE_TESTS; m++) {
 #ifdef USE_SEMAPHORES
-        uint64_t counter;
+        uint32_t counter = 0;
 #endif
         soma = 0;
 
         if(m > 0)
             threads_count += THREADS_SKIP;
-        
-#ifdef USE_SEMAPHORES
-        counter = threads_count;
-#endif
 
         threads = realloc((void*)threads, sizeof(pthread_t) * threads_count);
-        memset((void*)threads, 0, sizeof(pthread_t) * threads_count);
 
-        chunk_size = array_size / threads_count ;
-        for(uint64_t i = 0; i < threads_count; i++) {
+        chunk_size = array_size / threads_count;
+        for(uint32_t i = 0; i < threads_count; i++) {
             thread_producer_arg_t *arg = calloc(1, sizeof(thread_producer_arg_t));
-
-            arg->array = array+(i*chunk_size);
-            arg->count = chunk_size;
 
 #ifdef USE_SEMAPHORES
             arg->soma = 0;
-            arg->_semaphore = &_semaphore;
-            arg->_mutex1 = &_mutex1;
-            arg->_mutex2 = &_mutex2;
             arg->counter = &counter;
-            arg->_cond = &_cond;
+            arg->thread_count = threads_count;
+            arg->_sem_count = &_sem_count;
+            arg->_sem_stop = &_sem_stop;
 #endif
 
+            arg->array = array+(i*chunk_size);
+            arg->subarray_count = chunk_size;
+
             if(i == threads_count-1)
-                if(arg->array + arg->count < array + array_size)
-                    arg->count += (uint64_t)((array + array_size) - (arg->array + arg->count));
+                if(arg->array + arg->subarray_count < array + array_size)
+                    arg->subarray_count += (uint64_t)((array + array_size) - (arg->array + arg->subarray_count));
 
             if(pthread_create(threads+i, NULL, producer, (void*)arg))
                 return fail_errno("Erro ao criar threads");
             
         }
-
-
-#ifdef USE_SEMAPHORES
-        while(counter > 0){}
-        pthread_cond_broadcast(&_cond);
-#endif
 
         gettimeofday(&begin, 0);
         soma = 0;
@@ -193,6 +203,8 @@ int main(int argc, char **argv) {
             pthread_join(threads[i], &s);
 #ifdef USE_SEMAPHORES
             soma += ((thread_producer_arg_t*)s)->soma;
+            sem_destroy(((thread_producer_arg_t*)s)->_sem_count);
+            sem_destroy(((thread_producer_arg_t*)s)->_sem_stop);
             free(s);
 #else
             soma += (uint64_t) s;
@@ -204,10 +216,10 @@ int main(int argc, char **argv) {
         microseconds = end.tv_usec - begin.tv_usec;
         elapsed = seconds + microseconds*1e-6;
 
-        printf("Utilizando a forma multi-threaded com %lu threads, o algorítmo levou %lf segundos, resultando no valor %lu\n", threads_count, elapsed, soma);
+        printf("Utilizando a forma multi-threaded com %u threads, o algorítmo levou %lf segundos, resultando no valor %lu\n", threads_count, elapsed, soma);
 
 #ifdef WRITE_RESULT_LOG
-        sprintf(record, "%lu			%lf					%lu\n", threads_count, elapsed, array_size);
+        sprintf(record, "%u			%lf					%lu\n", threads_count, elapsed, array_size);
         fwrite(record, sizeof(char), strlen(record), f);
 #endif
     }
@@ -218,12 +230,6 @@ int main(int argc, char **argv) {
 
     free(array);
     free(threads);
-#ifdef USE_SEMAPHORES
-    sem_destroy(&_semaphore);
-    pthread_mutex_destroy(&_mutex1);
-    pthread_mutex_destroy(&_mutex2);
-    pthread_cond_destroy(&_cond);
-#endif
 
     pthread_exit(NULL);
 }

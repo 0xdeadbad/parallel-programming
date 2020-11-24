@@ -45,3 +45,8 @@ Basta adicionar -DCALC_SERIAL ao gcc
 
 exemplo de compilação:
 gcc -Wall -pedantic -Werror -o main main.c -lpthread -DMULTIPLE_TESTS=5 -DTHREADS_SKIP=5 -DWRITE_RESULT_LOG -DCALC_SERIAL
+
+=== Gerando executável sem utilizar semáforos ===
+Basta adicionar -DDONT_USE_SEMAPHORES ao gcc
+
+gcc -Wall -pedantic -Werror -o main main.c -lpthread -DMULTIPLE_TESTS=5 -DTHREADS_SKIP=5 -DWRITE_RESULT_LOG -DCALC_SERIAL -DDONT_USE_SEMAPHORES
