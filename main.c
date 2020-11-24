@@ -50,9 +50,8 @@
 
 typedef struct {
     uint32_t *array;
-    uint64_t subarray_count;
+    uint64_t subarray_count, soma;
 #ifdef USE_SEMAPHORES
-    uint64_t soma;
     uint32_t thread_count, *counter;
     sem_t *_sem_count, *_sem_stop;
 #endif
@@ -81,27 +80,16 @@ void* producer(void *arg) {
         sem_post(st->_sem_count);
         sem_wait(st->_sem_stop);
     }
-    
-#else
-    uint64_t s;
-    s = 0;
 #endif
     for(uint64_t i = 0; i < ((thread_producer_arg_t*)arg)->subarray_count; i++)
-#ifdef USE_SEMAPHORES
         ((thread_producer_arg_t*)arg)->soma += ((thread_producer_arg_t*)arg)->array[i];
     pthread_exit(arg);
-#else
-        s += ((thread_producer_arg_t*)arg)->array[i];
-    free(arg);
-    pthread_exit((void*) s);
-#endif
 }
 
 int main(int argc, char **argv) {
     uint64_t soma, array_size;
     uint32_t chunk_size, *array, threads_count;
     pthread_t *threads;
-    sem_t _sem_count, _sem_stop;
     struct timeval begin, end;
     char *end_ptr;
     long seconds, microseconds;
@@ -123,12 +111,7 @@ int main(int argc, char **argv) {
     if(threads_count > array_size)
         return fail("A quantidade de threads não pode ser maior que o tamanho do vetor.");
 
-    if(sem_init(&_sem_count, 0, 1) != 0)
-        return fail_errno("Falha ao iniciar semáforo");
-    if(sem_init(&_sem_stop, 0, 0) != 0)
-        return fail_errno("Falha ao iniciar semáforo");
-
-    array = calloc(array_size, sizeof(uint64_t));
+    array = calloc(array_size, sizeof(uint32_t));
     threads = NULL;
 
     for(uint64_t i = 0; i < array_size; i++)
@@ -137,7 +120,7 @@ int main(int argc, char **argv) {
 #ifdef CALC_SERIAL
     soma = 0;
     gettimeofday(&begin, 0);
-    for(uint64_t i = 0; i < array_size; i++)
+    for(uint32_t i = 0; i < array_size; i++)
         soma += array[i];
     gettimeofday(&end, 0);
 
@@ -164,6 +147,12 @@ int main(int argc, char **argv) {
     for(uint32_t m = 0; m < MULTIPLE_TESTS; m++) {
 #ifdef USE_SEMAPHORES
         uint32_t counter = 0;
+        sem_t _sem_count, _sem_stop;
+
+        if(sem_init(&_sem_count, 0, 1) != 0)
+            return fail_errno("Falha ao iniciar semáforo count");
+        if(sem_init(&_sem_stop, 0, 0) != 0)
+            return fail_errno("Falha ao iniciar semáforo stop");
 #endif
         soma = 0;
 
@@ -198,20 +187,19 @@ int main(int argc, char **argv) {
 
         gettimeofday(&begin, 0);
         soma = 0;
-        for(uint64_t i = 0; i < threads_count; i++) {
+        for(uint32_t i = 0; i < threads_count; i++) {
             void *s;
             pthread_join(threads[i], &s);
-#ifdef USE_SEMAPHORES
             soma += ((thread_producer_arg_t*)s)->soma;
-            sem_destroy(((thread_producer_arg_t*)s)->_sem_count);
-            sem_destroy(((thread_producer_arg_t*)s)->_sem_stop);
             free(s);
-#else
-            soma += (uint64_t) s;
-#endif
         }
         gettimeofday(&end, 0);
 
+#ifdef USE_SEMAPHORES
+        sem_destroy(&_sem_count);
+        sem_destroy(&_sem_stop);
+#endif
+    
         seconds = end.tv_sec - begin.tv_sec;
         microseconds = end.tv_usec - begin.tv_usec;
         elapsed = seconds + microseconds*1e-6;
