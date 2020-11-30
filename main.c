@@ -29,18 +29,18 @@
 #endif
 
 /*
- * Por padrão o programa irá utilizar de semáforos para criar uma barreira que sincronizará as threads, 
+ * Por padrão o programa irá utilizar mutex cond para criar uma barreira que sincronizará as threads, 
  * as fazendo iniciar a tarefa todas ao mesmo tempo.
  */
-#define USE_SEMAPHORES
+#define USE_MUTEX_COND
 
 /*
- * Caso seja desejado, também pode-se definir a macro DONT_USE_SEMAPHORES via parâmetro do compilador -DDONT_USE_SEMAPHORES.
+ * Caso seja desejado, também pode-se definir a macro DONT_USE_MUTEX_COND via parâmetro do compilador -DDONT_USE_MUTEX_COND.
  * Assim as threads não irão esperar a sincronização e poderam começar fora de ordem, porém não afeterá o resultado final da conta
  * mas provavelmente o tempo que as threads leverão para fazer os cálculos.
  */
-#ifdef DONT_USE_SEMAPHORES
-#undef USE_SEMAPHORES
+#ifdef DONT_USE_MUTEX_COND
+#undef USE_MUTEX_COND
 #endif
 
 /*
@@ -51,9 +51,11 @@
 typedef struct {
     uint32_t *array;
     uint64_t subarray_count, soma;
-#ifdef USE_SEMAPHORES
+#ifdef USE_MUTEX_COND
     uint32_t thread_count, *counter;
-    sem_t *_sem_count, *_sem_stop;
+    pthread_mutex_t *_barrier;
+    pthread_cond_t *_cond;
+    int id;
 #endif
 } thread_producer_arg_t;
 
@@ -68,18 +70,16 @@ int fail_errno(const char *msg) {
 }
 
 void* producer(void *arg) {
-#ifdef USE_SEMAPHORES
+#ifdef USE_MUTEX_COND
     thread_producer_arg_t *st = (thread_producer_arg_t*)arg;
-    sem_wait(st->_sem_count);
-    if(*(st->counter) == st->thread_count - 1) {
-        sem_post(st->_sem_count);
-        for(uint32_t i = 0; i < st->thread_count - 1; i++)
-            sem_post(st->_sem_stop);
-    } else {
-        (*(st->counter))++;
-        sem_post(st->_sem_count);
-        sem_wait(st->_sem_stop);
-    }
+    pthread_mutex_lock(st->_barrier);
+    (*(st->counter)) ++;
+    if(*(st->counter) == st->thread_count) {
+        st->counter = 0;
+        pthread_cond_broadcast(st->_cond);
+    } else 
+        while(pthread_cond_wait(st->_cond, st->_barrier) != 0);
+    pthread_mutex_unlock(st->_barrier);
 #endif
     for(uint64_t i = 0; i < ((thread_producer_arg_t*)arg)->subarray_count; i++)
         ((thread_producer_arg_t*)arg)->soma += ((thread_producer_arg_t*)arg)->array[i];
@@ -145,14 +145,15 @@ int main(int argc, char **argv) {
 #endif
 
     for(uint32_t m = 0; m < MULTIPLE_TESTS; m++) {
-#ifdef USE_SEMAPHORES
+#ifdef USE_MUTEX_COND
         uint32_t counter = 0;
-        sem_t _sem_count, _sem_stop;
+        pthread_mutex_t _barrier;
+        pthread_cond_t _cond;
 
-        if(sem_init(&_sem_count, 0, 1) != 0)
-            return fail_errno("Falha ao iniciar semáforo count");
-        if(sem_init(&_sem_stop, 0, 0) != 0)
-            return fail_errno("Falha ao iniciar semáforo stop");
+        if(pthread_mutex_init(&_barrier, NULL) != 0)
+            return fail_errno("Falha ao iniciar mutex _barrier");
+        if(pthread_cond_init(&_cond, NULL) != 0)
+            return fail_errno("Falha ao iniciar cond _cond");
 #endif
         soma = 0;
 
@@ -163,14 +164,15 @@ int main(int argc, char **argv) {
 
         chunk_size = array_size / threads_count;
         for(uint32_t i = 0; i < threads_count; i++) {
-            thread_producer_arg_t *arg = calloc(1, sizeof(thread_producer_arg_t));
+            thread_producer_arg_t *arg = malloc(sizeof(thread_producer_arg_t));
 
-#ifdef USE_SEMAPHORES
+#ifdef USE_MUTEX_COND
             arg->soma = 0;
             arg->counter = &counter;
             arg->thread_count = threads_count;
-            arg->_sem_count = &_sem_count;
-            arg->_sem_stop = &_sem_stop;
+            arg->_barrier = &_barrier;
+            arg->_cond = &_cond;
+            arg->id = i;
 #endif
 
             arg->array = array+(i*chunk_size);
@@ -185,6 +187,7 @@ int main(int argc, char **argv) {
             
         }
 
+#ifdef USE_MUTEX_COND
         gettimeofday(&begin, 0);
         soma = 0;
         for(uint32_t i = 0; i < threads_count; i++) {
@@ -195,9 +198,8 @@ int main(int argc, char **argv) {
         }
         gettimeofday(&end, 0);
 
-#ifdef USE_SEMAPHORES
-        sem_destroy(&_sem_count);
-        sem_destroy(&_sem_stop);
+        pthread_mutex_destroy(&_barrier);
+        pthread_cond_destroy(&_cond);
 #endif
     
         seconds = end.tv_sec - begin.tv_sec;
